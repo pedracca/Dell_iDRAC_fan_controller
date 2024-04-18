@@ -1,62 +1,75 @@
-# Define global functions
-# This function applies Dell's default dynamic fan control profile
-function apply_Dell_fan_control_profile () {
-  # Use ipmitool to send the raw command to set fan control to Dell default
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x01 0x01 > /dev/null
-  CURRENT_FAN_CONTROL_PROFILE="Dell default dynamic fan control profile"
-}
+#!/bin/bash
 
-# This function applies a user-specified static fan control profile
-function apply_user_fan_control_profile () {
-  # Use ipmitool to send the raw command to set fan control to user-specified value
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x01 0x00 > /dev/null
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x02 0xff $HEXADECIMAL_FAN_SPEED > /dev/null
-  CURRENT_FAN_CONTROL_PROFILE="User static fan control profile ($DECIMAL_FAN_SPEED%)"
-}
-
-# Retrieve temperature sensors data using ipmitool
-# Usage : retrieve_temperatures $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
-function retrieve_temperatures () {
-  if (( $# != 2 ))
-  then
-    printf "Illegal number of parameters.\nUsage: retrieve_temperatures \$IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT \$IS_CPU2_TEMPERATURE_SENSOR_PRESENT" >&2
-    return 1
-  fi
-  local IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT=$1
-  local IS_CPU2_TEMPERATURE_SENSOR_PRESENT=$2
-
-  local DATA=$(ipmitool -I $IDRAC_LOGIN_STRING sdr type temperature | grep degrees)
-
-  # Parse CPU data
-  local CPU_DATA=$(echo "$DATA" | grep "3\." | grep -Po '\d{2}')
-  CPU1_TEMPERATURE=$(echo $CPU_DATA | awk '{print $1;}')
-  if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
-  then
-    CPU2_TEMPERATURE=$(echo $CPU_DATA | awk '{print $2;}')
+function get_hdd_temps() {
+  local -n _hddtemps="$1"
+  if [[ "${_hddtemps[@]+"set"}" != "set" ]]; then
+    debug "hddtemps is empty, collecting new data"
+    if [[ -n "$TEST_MODE" ]]; then
+      debug "Applying test data to HDD TEMPS"
+      mapfile -t _hddtemps < "hddtemps.out"
+    else
+      debug "Collecting HDD TEMP real data"
+      hddtempcmd="timeout -k 1 20 ./hddtemp.sh /dev/sd?" # /dev/nvme?n?" skip errors if no nvme installed
+      $hddtempcmd | grep -v 'not available' > $TEMP_FILENAME
+      mapfile -t _hddtemps < "$TEMP_FILENAME"
+    fi
+    # filter in numbers only and remove all extraneous output, and some
+    # devices permanently return a *temperature* of 255, so filter them
+    # out too.
+    mapfile -t _hddtemps < <(printf "%s\n" "${_hddtemps[@]}" | grep -E '[0-9]' | grep -v '255')
+    for temp in "${_hddtemps[@]}"; do
+      debug "Collected HDD temp data: $temp"
+    done
   else
-    CPU2_TEMPERATURE="-"
+    debug "hddtemps still holds data, skipping new collection"
   fi
+}
 
-  # Parse inlet temperature data
-  INLET_TEMPERATURE=$(echo "$DATA" | grep Inlet | grep -Po '\d{2}' | tail -1)
-
-  # If exhaust temperature sensor is present, parse its temperature data
-  if $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT
-  then
-    EXHAUST_TEMPERATURE=$(echo "$DATA" | grep Exhaust | grep -Po '\d{2}' | tail -1)
+function get_ambient_temp() {
+  local -n _ambient_ipmitemps="$1"
+  local -n _ambient_temp="$2"
+  if [[ "${_ambient_ipmitemps[@]+"set"}" != "set" ]]; then
+    debug "ambient_ipmitemps is empty, collecting new data"
+    if [[ -n "$TEST_MODE" ]]; then
+      debug "Applying test data to AMBIENT TEMPS"
+      #mapfile -t _ambient_ipmitemps < "sdr-temp.out"
+      mapfile -t _ambient_ipmitemps < <(grep "$IPMI_INLET_SENSORNAME" "sdr-temp.out" | grep '[0-9]' || echo " | $_ambient_temp degrees C")
+    else
+      debug "Collecting AMBIENT TEMP real data"
+      # ipmitool often fails - just keep using the previous result til it succeeds
+      _ambient_ipmitemps=$(timeout -k 1 20 ipmitool sdr type temperature | grep "$IPMI_INLET_SENSORNAME" | grep '[0-9]' || echo " | $_ambient_temp degrees C")
+    fi
+    debug "Ambient temps: ${_ambient_ipmitemps[*]}"
   else
-    EXHAUST_TEMPERATURE="-"
+    debug "ambient_ipmitemps still holds data, skipping new collection"
   fi
 }
 
-function enable_third_party_PCIe_card_Dell_default_cooling_response () {
-  # We could check the current cooling response before applying but it's not very useful so let's skip the test and apply directly
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00 > /dev/null
+function get_cpu_temps() {
+  local -n _cputemps="$1"
+  local -n _coretemps="$2"
+  if [[ -n "$TEST_MODE" ]]; then
+    debug "Applying test data to CPU and CORE TEMPS"
+    mapfile -t _coretemps < "sensors.out"
+  else
+    _coretemps=$(timeout -k 1 20 sensors | grep '[0-9]')
+  fi
+  mapfile -t _cputemps < <(printf "%s\n" "${_coretemps[@]}" | grep '^Package id')
+  debug "CPU temps: ${_cputemps[*]}"
+  mapfile -t _coretemps < <(printf "%s\n" "${_coretemps[@]}" | grep '^Core')
+  debug "Core temps: ${_coretemps[*]}"
 }
 
-function disable_third_party_PCIe_card_Dell_default_cooling_response () {
+function enable_third_party_PCIe_card_Dell_default_cooling_response() {
   # We could check the current cooling response before applying but it's not very useful so let's skip the test and apply directly
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00 > /dev/null
+  #ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00 > /dev/null
+  call_ipmi "raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00" "quiet"
+}
+
+function disable_third_party_PCIe_card_Dell_default_cooling_response() {
+  # We could check the current cooling response before applying but it's not very useful so let's skip the test and apply directly
+  #ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00 > /dev/null
+  call_ipmi "raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00" "quiet"
 }
 
 # Returns :
@@ -77,16 +90,20 @@ function disable_third_party_PCIe_card_Dell_default_cooling_response () {
 # }
 
 # Prepare traps in case of container exit
-function gracefull_exit () {
-  apply_Dell_fan_control_profile
+function gracefull_exit() {
+  set_fans_default
   enable_third_party_PCIe_card_Dell_default_cooling_response
   echo "/!\ WARNING /!\ Container stopped, Dell default dynamic fan control profile applied for safety."
   exit 0
 }
 
 # Helps debugging when people are posting their output
-function get_Dell_server_model () {
-  IPMI_FRU_content=$(ipmitool -I $IDRAC_LOGIN_STRING fru 2>/dev/null) # FRU stands for "Field Replaceable Unit"
+function get_Dell_server_model() {
+  #IPMI_FRU_content=$(ipmitool -I $IDRAC_LOGIN_STRING fru 2>/dev/null) # FRU stands for "Field Replaceable Unit"
+  IPMI_FRU_content=$(call_ipmi "fru" "supress_errors") # FRU stands for "Field Replaceable Unit"
+  if [[ -n "$TEST_MODE" ]]; then
+    IPMI_FRU_content=$(cat fru.out)
+  fi
 
   SERVER_MANUFACTURER=$(echo "$IPMI_FRU_content" | grep "Product Manufacturer" | awk -F ': ' '{print $2}')
   SERVER_MODEL=$(echo "$IPMI_FRU_content" | grep "Product Name" | awk -F ': ' '{print $2}')
@@ -100,4 +117,72 @@ function get_Dell_server_model () {
   if [ -z "$SERVER_MODEL" ]; then
     SERVER_MODEL=$(echo "$IPMI_FRU_content" | tr -s ' ' | grep "Board Product :" | awk -F ': ' '{print $2}')
   fi
+}
+
+# Single point call ipmi
+function call_ipmi() {
+  local command=$1
+  local desired_verbosity=$2
+  if [[ -n "$TEST_MODE" ]]; then
+    desired_verbosity="TEST"
+  fi
+  case $desired_verbosity in
+    TEST) echo "ipmitool" -I $IDRAC_LOGIN_STRING ${command} > `tty` ;;
+    DEBUG) "ipmitool" -I $IDRAC_LOGIN_STRING ${command} ;;
+    quiet) "ipmitool" -I $IDRAC_LOGIN_STRING ${command} 1>/dev/null ;;
+    supress_errors) "ipmitool" -I $IDRAC_LOGIN_STRING ${command} 2>/dev/null ;;
+    supress_all) "ipmitool" -I $IDRAC_LOGIN_STRING ${command} &>/dev/null ;;
+    *) "ipmitool" -I $IDRAC_LOGIN_STRING ${command} ;;
+  esac
+}
+
+function panic() {
+  set_fans_default
+  enable_third_party_PCIe_card_Dell_default_cooling_response
+}
+
+# Función para simular un log en la salida estándar
+log() {
+    # Obtener la fecha y hora actual
+    local fecha=$(date +"%Y-%m-%d %H:%M:%S.%3N")
+
+    # Nivel de registro ("DEBUG", "INFO", "WARNING", "ERROR")
+    local nivel_string=$1
+    local nivel=0
+    case $nivel_string in
+      DEBUG) nivel=$LOG_LEVEL_DEBUG ;;
+      INFO) nivel=$LOG_LEVEL_INFO ;;
+      WARN) nivel=$LOG_LEVEL_WARN ;;
+      WARNING) nivel=$LOG_LEVEL_WARN ;;
+      ERROR) nivel=$LOG_LEVEL_ERROR ;;
+      *) nivel=0 ;;
+    esac
+
+    if [ "$nivel" -lt "$VERBOSITY" ]; then
+        return
+    fi
+
+    # Mensaje del log
+    local mensaje="$2"
+
+    local formatted=$( printf "[%s][%-5s] %s\n" "$fecha" "$nivel_string" "$mensaje" )
+
+    # Imprimir el log en la salida estándar
+    echo "$formatted"
+}
+
+debug() {
+  log "DEBUG" "$1"
+}
+
+info() {
+  log "INFO" "$1"
+}
+
+warning() {
+  log "WARN" "$1"
+}
+
+error() {
+  log "ERROR" "$1"
 }

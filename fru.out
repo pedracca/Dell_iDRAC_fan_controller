@@ -1,0 +1,52 @@
+FRU Device Description : Builtin FRU Device (ID 0)
+ Board Mfg Date        : Fri Dec 23 23:24:00 2016
+ Board Mfg             : DELL
+ Board Product         : PowerEdge R730xd
+ Board Serial          : CN701636CM00SG
+ Board Part Number     : 0WCJNTA05
+ Product Manufacturer  : DELL
+ Product Name          : PowerEdge R730xd
+ Product Version       : 01
+ Product Serial        : J5B14J2
+
+FRU Device Description : PS1 (ID 1)
+ Board Mfg Date        : Wed Feb 24 10:09:00 2016
+ Board Mfg             : DELL
+ Board Product         : PWR SPLY,1100W,RDNT,DELTA
+ Board Serial          : CN1797262G0B01
+ Board Part Number     : 0PR21CA00
+
+FRU Device Description : PS2 (ID 2)
+ Board Mfg Date        : Wed Feb 24 15:22:00 2016
+ Board Mfg             : DELL
+ Board Product         : PWR SPLY,1100W,RDNT,DELTA
+ Board Serial          : CN1797262G0AOI
+ Board Part Number     : 0PR21CA00
+
+FRU Device Description : BP0 (ID 12)
+ Device not present (Timeout)
+
+FRU Device Description : BP1 (ID 13)
+ Device not present (Timeout)
+
+FRU Device Description : BP2 (ID 14)
+ Device not present (Timeout)
+
+FRU Device Description : BP3 (ID 15)
+ Device not present (Timeout)
+
+FRU Device Description : NDC (ID 4)
+ Board Mfg Date        : Thu May 25 14:00:00 2017
+ Board Mfg             : DELL
+ Board Product         : Intel(R) 2P X540/2P I350 rNDC
+ Board Serial          : MY124027630138
+ Board Part Number     : 099GTMA01
+
+FRU Device Description : PERC1 (ID 10)
+ Board Mfg Date        : Wed Jan 18 19:20:00 2017
+ Board Mfg             : DELL
+ Board Product         : Dell Storage Cntlr. H730P-Mini
+ Board Serial          : CN7792171H01S6
+ Board Part Number     : 07H4CNA06
+
+FRU Device Description : OEM fru (ID 17)

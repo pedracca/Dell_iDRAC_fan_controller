@@ -4,24 +4,20 @@
 # Not working in some setups : https://github.com/tigerblue77/Dell_iDRAC_fan_controller/issues/48
 # set -euo pipefail
 
+cd "$(dirname "$0")"
+
+if [[ -f config.properties ]]; then
+  source config.properties
+fi
 source functions.sh
+source fan_control.sh
+if [[ -f telegraf-integration.sh ]]; then
+  source telegraf-integration.sh
+fi
+
 
 # Trap the signals for container exit and run gracefull_exit function
 trap 'gracefull_exit' SIGQUIT SIGKILL SIGTERM
-
-# Prepare, format and define initial variables
-
-# readonly DELL_FRESH_AIR_COMPLIANCE=45
-
-# Check if FAN_SPEED variable is in hexadecimal format. If not, convert it to hexadecimal
-if [[ $FAN_SPEED == 0x* ]]
-then
-  DECIMAL_FAN_SPEED=$(printf '%d' $FAN_SPEED)
-  HEXADECIMAL_FAN_SPEED=$FAN_SPEED
-else
-  DECIMAL_FAN_SPEED=$FAN_SPEED
-  HEXADECIMAL_FAN_SPEED=$(printf '0x%02x' $FAN_SPEED)
-fi
 
 # Check if the iDRAC host is set to 'local' or not then set the IDRAC_LOGIN_STRING accordingly
 if [[ $IDRAC_HOST == "local" ]]
@@ -50,113 +46,100 @@ fi
 echo "Server model: $SERVER_MANUFACTURER $SERVER_MODEL"
 echo "iDRAC/IPMI host: $IDRAC_HOST"
 
-# Log the fan speed objective, CPU temperature threshold and check interval
-echo "Fan speed objective: $DECIMAL_FAN_SPEED%"
-echo "CPU temperature threshold: $CPU_TEMPERATURE_THRESHOLD°C"
+# Log the check interval
 echo "Check interval: ${CHECK_INTERVAL}s"
 echo ""
 
-# Define the interval for printing
-readonly TABLE_HEADER_PRINT_INTERVAL=10
-i=$TABLE_HEADER_PRINT_INTERVAL
-# Set the flag used to check if the active fan control profile has changed
-IS_DELL_FAN_CONTROL_PROFILE_APPLIED=true
-
-# Check present sensors
-IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT=true
-IS_CPU2_TEMPERATURE_SENSOR_PRESENT=true
-retrieve_temperatures $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
-if [ -z "$EXHAUST_TEMPERATURE" ]
-then
-  echo "No exhaust temperature sensor detected."
-  IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT=false
-fi
-if [ -z "$CPU2_TEMPERATURE" ]
-then
-  echo "No CPU2 temperature sensor detected."
-  IS_CPU2_TEMPERATURE_SENSOR_PRESENT=false
-fi
-# Output new line to beautify output if one of the previous conditions have echoed
-if ! $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT || ! $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
-then
-  echo ""
-fi
-
 # Start monitoring
+last_reset_hddtemps=$(date +%s)
+last_reset_ambient_ipmitemps=$last_reset_hddtemps
+last_reset_healthcheck=$last_reset_hddtemps
+ambient_temp=20
+
+ambient_ipmitemps=()
+cputemps=()
+coretemps=()
+hddtemps=()
 while true; do
+  debug "Main loop start"
   # Sleep for the specified interval before taking another reading
   sleep $CHECK_INTERVAL &
   SLEEP_PROCESS_PID=$!
 
-  retrieve_temperatures $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
+  get_ambient_temp "ambient_ipmitemps" "ambient_temp"
+  get_cpu_temps "cputemps" "coretemps"
+  get_hdd_temps "hddtemps"
 
-  # Define functions to check if CPU 1 and CPU 2 temperatures are above the threshold
-  function CPU1_OVERHEAT () { [ $CPU1_TEMPERATURE -gt $CPU_TEMPERATURE_THRESHOLD ]; }
-  if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
-  then
-    function CPU2_OVERHEAT () { [ $CPU2_TEMPERATURE -gt $CPU_TEMPERATURE_THRESHOLD ]; }
-  fi
+  for ((i = 0; i < ${#cputemps[@]}; i++)); do
+    cputemps[$i]=${cputemps[$i]%$'\n'}
+    cputemps[$i]=$( echo "${cputemps[$i]}" | sed -E 's/.*: *[-+]?([0-9.]+)..?C\b.*/\1/' ) 
+  done
+  for ((i = 0; i < ${#coretemps[@]}; i++)); do
+    coretemps[$i]=${coretemps[$i]%$'\n'}
+    coretemps[$i]=$( echo "${coretemps[$i]}" | sed -E 's/.*: *[-+]?([0-9.]+)..?C\b.*/\1/' )
+  done
+  for ((i = 0; i < ${#ambient_ipmitemps[@]}; i++)); do
+    ambient_ipmitemps[$i]=${ambient_ipmitemps[$i]%$'\n'}
+    ambient_ipmitemps[$i]=$( echo "${ambient_ipmitemps[$i]}" | sed -E 's/.*\| ([^ ]*) degrees C.*/\1/' )
+  done
+  for ((i = 0; i < ${#hddtemps[@]}; i++)); do
+    hddtemps[$i]=${hddtemps[$i]%$'\n'}
+    hddtemps[$i]=$( echo "${hddtemps[$i]}" | sed -E 's/.*: *([-+0-9.]+)..?C\b.*/\1/' )
+  done
 
-  # Initialize a variable to store the comments displayed when the fan control profile changed
-  COMMENT=" -"
-  # Check if CPU 1 is overheating then apply Dell default dynamic fan control profile if true
-  if CPU1_OVERHEAT
-  then
-    apply_Dell_fan_control_profile
+  debug "Collected and computed data:"
+  debug "Ambient temp: $ambient_temp"
+  debug "CPU temp: ${cputemps[*]}"
+  debug "Core temp: ${coretemps[*]}"
+  debug "HDD temp: ${hddtemps[*]}"
 
-    if ! $IS_DELL_FAN_CONTROL_PROFILE_APPLIED
-    then
-      IS_DELL_FAN_CONTROL_PROFILE_APPLIED=true
-
-      # If CPU 2 temperature sensor is present, check if it is overheating too.
-      # Do not apply Dell default dynamic fan control profile as it has already been applied before
-      if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEAT
-      then
-        COMMENT="CPU 1 and CPU 2 temperatures are too high, Dell default dynamic fan control profile applied for safety"
-      else
-        COMMENT="CPU 1 temperature is too high, Dell default dynamic fan control profile applied for safety"
-      fi
-    fi
-  # If CPU 2 temperature sensor is present, check if it is overheating then apply Dell default dynamic fan control profile if true
-  elif $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEAT
-  then
-    apply_Dell_fan_control_profile
-
-    if ! $IS_DELL_FAN_CONTROL_PROFILE_APPLIED
-    then
-      IS_DELL_FAN_CONTROL_PROFILE_APPLIED=true
-      COMMENT="CPU 2 temperature is too high, Dell default dynamic fan control profile applied for safety"
+  ambient_temp=$( average "${ambient_ipmitemps[@]}" )
+  # FIXME: hysteresis
+  if [ "$ambient_temp" -gt "$DEFAULT_THRESHOLD" ]; then
+    warning "fallback because of high ambient temperature $ambient_temp > $DEFAULT_THRESHOLD"
+    if ! set_fans_default; then
+      # return for next loop without resetting timers and delta change if that fails
+      error "set_fans_default failed, retrying main loop skipping timers reset"
+      continue
     fi
   else
-    apply_user_fan_control_profile
-
-    # Check if user fan control profile is applied then apply it if not
-    if $IS_DELL_FAN_CONTROL_PROFILE_APPLIED
-    then
-      IS_DELL_FAN_CONTROL_PROFILE_APPLIED=false
-      COMMENT="CPU temperature decreased and is now OK (<= $CPU_TEMPERATURE_THRESHOLD°C), user's fan control profile applied."
+    if ! set_fans_servo "$ambient_temp" "cputemps" "coretemps" "hddtemps"; then
+      # return for next loop without resetting timers and delta change if that fails
+      error "set_fans_servo failed, retrying main loop skipping timers reset"
+      continue
     fi
   fi
 
-  # Enable or disable, depending on the user's choice, third-party PCIe card Dell default cooling response
-  # No comment will be displayed on the change of this parameter since it is not related to the temperature of any device (CPU, GPU, etc...) but only to the settings made by the user when launching this Docker container
-  if $DISABLE_THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE
-  then
-    disable_third_party_PCIe_card_Dell_default_cooling_response
-    THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS="Disabled"
-  else
-    enable_third_party_PCIe_card_Dell_default_cooling_response
-    THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS="Enabled"
+  # every 20 minutes (enough to establish spin-down), invalidate the
+  # cache of the slowly changing hdd temperatures to allow them to be
+  # refreshed
+  current_timestamp=$(date +%s)
+  if ((current_timestamp - last_reset_hddtemps > 1200)); then
+      unset hddtemps
+      info "resetting hddtemps"
+      last_reset_hddtemps=$current_timestamp
+  fi
+  # every 60 seconds, invalidate the cache of the slowly changing
+  # ambient temperatures to allow them to be refreshed
+  if ((current_timestamp - last_reset_ambient_ipmitemps > 60)); then
+      unset ambient_ipmitemps
+      info "resetting ambient_ipmitemps"
+      current_mode="reset"; # just in case the RAC has rebooted, it
+      # will go back into default control, so
+      # make sure we set it appropriately once
+      # per minute
+      last_reset_ambient_ipmitemps=$current_timestamp
+  fi
+  if [[ -n "$HEALTHCHECK_INTERVAL" && -n "$HEALTHCHECK_URL" ]]; then
+    if ((current_timestamp - last_reset_healthcheck > HEALTHCHECK_INTERVAL)); then
+        if curl -fsS --retry 3 "$HEALTHCHECK_URL" >/dev/null 2>&1; then
+          debug "Healthcheck called OK"
+        else
+          error "Healthcheck call FAILED."
+        fi
+        last_reset_healthcheck=$current_timestamp
+    fi
   fi
 
-  # Print temperatures, active fan control profile and comment if any change happened during last time interval
-  if [ $i -eq $TABLE_HEADER_PRINT_INTERVAL ]
-  then
-    echo "                     ------- Temperatures -------"
-    echo "    Date & time      Inlet  CPU 1  CPU 2  Exhaust          Active fan speed profile          Third-party PCIe card Dell default cooling response  Comment"
-    i=0
-  fi
-  printf "%19s  %3d°C  %3d°C  %3s°C  %5s°C  %40s  %51s  %s\n" "$(date +"%d-%m-%Y %T")" $INLET_TEMPERATURE $CPU1_TEMPERATURE "$CPU2_TEMPERATURE" "$EXHAUST_TEMPERATURE" "$CURRENT_FAN_CONTROL_PROFILE" "$THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS" "$COMMENT"
-  ((i++))
   wait $SLEEP_PROCESS_PID
 done

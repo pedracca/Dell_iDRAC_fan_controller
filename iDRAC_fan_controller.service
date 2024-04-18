@@ -1,0 +1,11 @@
+[Unit]
+Description=DELL iDRAC Fan Controller Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/shutup/Dell_iDRAC_fan_controller.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

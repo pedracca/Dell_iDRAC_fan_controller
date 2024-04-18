@@ -21,4 +21,5 @@ else
   IDRAC_LOGIN_STRING="lanplus -H $IDRAC_HOST -U $IDRAC_USERNAME -P $IDRAC_PASSWORD"
 fi
 
-ipmitool -I $IDRAC_LOGIN_STRING sdr type temperature
+#ipmitool -I $IDRAC_LOGIN_STRING sdr type temperature
+call_ipmi "sdr type temperature"
